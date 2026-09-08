@@ -98,7 +98,7 @@
       border: 1px solid #ddd;
       border-radius: 6px;
       padding: 10px;
-      resize: none;
+      resize: vertical;
       margin-bottom: 10px;
       font-size: 14px;
       word-break: break-word;
@@ -222,12 +222,6 @@
       color: #65676b;
     }
 
-    .post-info .date {
-      font-size: 12px;
-      color: #65676b;
-    }
-
-    /* ИКОНКА ЗВЁЗДОЧКИ АДМИНИСТРАТОРА */
     .admin-star {
       color: #f5c518;
       font-size: 14px;
@@ -301,6 +295,7 @@
       border-radius: 12px;
       font-size: 13px;
       word-break: break-word;
+      white-space: pre-wrap;
     }
 
     .comment-author {
@@ -452,17 +447,12 @@
       outline: none;
     }
 
-    .modal input:disabled {
-      background-color: #e4e6eb;
-      cursor: not-allowed;
-      color: #65676b;
-    }
-
     .timer-info {
-      font-size: 12px;
+      font-size: 13px;
       color: #d93025;
-      margin-top: 6px;
+      margin-top: 8px;
       font-weight: bold;
+      text-align: center;
     }
 
     .password-input-wrapper {
@@ -603,6 +593,7 @@
       color: #1c1e21;
       font-style: italic;
       margin-bottom: 12px;
+      word-break: break-word;
     }
 
     .profile-stats {
@@ -712,9 +703,6 @@
     .dialog-name {
       font-size: 14px;
       font-weight: bold;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
       display: flex;
       align-items: center;
       gap: 4px;
@@ -723,9 +711,7 @@
     .dialog-last-msg {
       font-size: 12px;
       color: #65676b;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      word-break: break-word;
     }
 
     .chat-main {
@@ -755,12 +741,13 @@
     }
 
     .msg-bubble {
-      max-width: 70%;
+      max-width: 80%;
       padding: 10px 14px;
       border-radius: 16px;
       font-size: 14px;
       line-height: 1.4;
       word-break: break-word;
+      white-space: pre-wrap;
     }
 
     .msg-bubble.my-msg {
@@ -788,8 +775,14 @@
       padding: 12px;
       border-top: 1px solid #e5e5e5;
       display: flex;
-      gap: 10px;
+      flex-direction: column;
+      gap: 6px;
       background: white;
+    }
+
+    .chat-input-row {
+      display: flex;
+      gap: 10px;
     }
 
     .chat-input-area input {
@@ -850,6 +843,7 @@
         <input type="file" id="postImageInput" accept="image/*">
         <button id="publishBtn">Опубликовать</button>
       </div>
+      <div id="postTimerInfo" class="timer-info"></div>
     </div>
 
     <div id="feed"></div>
@@ -982,8 +976,11 @@
           </div>
 
           <div class="chat-input-area" id="chatInputArea" style="display: none;">
-            <input type="text" id="chatInput" placeholder="Напишите сообщение...">
-            <button id="sendMsgBtn">Отправить</button>
+            <div class="chat-input-row">
+              <input type="text" id="chatInput" placeholder="Напишите сообщение...">
+              <button id="sendMsgBtn">Отправить</button>
+            </div>
+            <div id="chatTimerInfo" class="timer-info"></div>
           </div>
         </div>
       </div>
@@ -991,7 +988,12 @@
   </div>
 
   <script>
-    // Пользователь AmalplayRw назначен единственным администратором
+    const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000; 
+    const SPAM_COOLDOWN_MS = 60 * 1000;
+
+    // Синхронизация между вкладками одного браузера
+    const syncChannel = new BroadcastChannel('school_vibe_sync');
+
     const defaultUsers = {
       'amalplayrw': {
         name: 'Amal play_rw',
@@ -1011,17 +1013,46 @@
         authorUsername: 'amalplayrw',
         text: 'Привет всем! Добро пожаловать в School Vibe! 🎉',
         imageUrl: null,
+        timestamp: Date.now(),
         timeStr: 'Только что',
         likes: [],
         comments: []
       }
     ];
 
+    let lastPostTime = 0;
+    let lastChatMsgTime = 0;
+
     let messagesDatabase = JSON.parse(localStorage.getItem('sv_messages')) || {};
     let usersDatabase = JSON.parse(localStorage.getItem('sv_users')) || defaultUsers;
     let postsData = JSON.parse(localStorage.getItem('sv_posts')) || defaultPosts;
-    
-    // Принудительно устанавливаем права админа ТОЛЬКО для AmalplayRw (и регистронезависимо)
+
+    function cleanupOldData() {
+      const now = Date.now();
+
+      postsData = postsData.filter(post => {
+        const postAge = now - (post.timestamp || 0);
+        return postAge < FIVE_DAYS_MS;
+      });
+
+      postsData.forEach(post => {
+        if (post.comments) {
+          post.comments = post.comments.filter(c => (now - (c.timestamp || 0)) < FIVE_DAYS_MS);
+        }
+      });
+
+      Object.keys(messagesDatabase).forEach(chatKey => {
+        messagesDatabase[chatKey] = messagesDatabase[chatKey].filter(msg => {
+          return (now - (msg.timestamp || 0)) < FIVE_DAYS_MS;
+        });
+        if (messagesDatabase[chatKey].length === 0) {
+          delete messagesDatabase[chatKey];
+        }
+      });
+    }
+
+    cleanupOldData();
+
     Object.keys(usersDatabase).forEach(u => {
       if (u.toLowerCase() === 'amalplayrw') {
         usersDatabase[u].isAdmin = true;
@@ -1037,8 +1068,9 @@
     let activeViewUsername = null;
     let activeChatTargetUsername = null;
 
-    function saveData() {
+    function saveData(notifyOtherTabs = true) {
       try {
+        cleanupOldData();
         localStorage.setItem('sv_users', JSON.stringify(usersDatabase));
         localStorage.setItem('sv_posts', JSON.stringify(postsData));
         localStorage.setItem('sv_messages', JSON.stringify(messagesDatabase));
@@ -1047,12 +1079,34 @@
         } else {
           localStorage.removeItem('sv_current_user');
         }
+
+        if (notifyOtherTabs) {
+          syncChannel.postMessage('DATA_UPDATED');
+        }
       } catch (e) {
         console.error('Ошибка сохранения данных:', e);
       }
     }
 
-    // Звёздочка отрисовывается только если у пользователя isAdmin === true
+    // Обработчик автообновления данных из других вкладок
+    syncChannel.onmessage = (event) => {
+      if (event.data === 'DATA_UPDATED') {
+        messagesDatabase = JSON.parse(localStorage.getItem('sv_messages')) || {};
+        usersDatabase = JSON.parse(localStorage.getItem('sv_users')) || defaultUsers;
+        postsData = JSON.parse(localStorage.getItem('sv_posts')) || defaultPosts;
+        
+        if (currentUser && usersDatabase[currentUser.username]) {
+          currentUser = usersDatabase[currentUser.username];
+        }
+
+        renderFeed(searchInput.value);
+        if (chatsModal.style.display === 'flex') {
+          renderDialogsList();
+          renderActiveChatMessages();
+        }
+      }
+    };
+
     function getAdminStarHTML(username) {
       if (!username) return '';
       const u = usersDatabase[username.toLowerCase()];
@@ -1112,11 +1166,13 @@
     const chatInput = document.getElementById('chatInput');
     const sendMsgBtn = document.getElementById('sendMsgBtn');
     const chatTargetName = document.getElementById('chatTargetName');
+    const chatTimerInfo = document.getElementById('chatTimerInfo');
 
     const publishBtn = document.getElementById('publishBtn');
     const postText = document.getElementById('postText');
     const feed = document.getElementById('feed');
     const searchInput = document.getElementById('searchInput');
+    const postTimerInfo = document.getElementById('postTimerInfo');
 
     const postImageInput = document.getElementById('postImageInput');
     const postImagePreview = document.getElementById('postImagePreview');
@@ -1234,9 +1290,13 @@
         const bubble = document.createElement('div');
         const isMy = m.from === currentUser.username;
         bubble.className = `msg-bubble ${isMy ? 'my-msg' : 'other-msg'}`;
+        
+        const d = new Date(m.timestamp || Date.now());
+        const timeFormatted = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
         bubble.innerHTML = `
           <div>${m.text}</div>
-          <div class="msg-time">${m.time}</div>
+          <div class="msg-time">${timeFormatted}</div>
         `;
         messagesArea.appendChild(bubble);
       });
@@ -1244,34 +1304,35 @@
       messagesArea.scrollTop = messagesArea.scrollHeight;
     }
 
-    function handleSendMessage() {
-      if (!activeChatTargetUsername || !currentUser) return;
+    sendMsgBtn.addEventListener('click', () => {
       const text = chatInput.value.trim();
-      if (!text) return;
+      if (!text || !activeChatTargetUsername) return;
 
-      const key = getChatKey(currentUser.username, activeChatTargetUsername);
-      if (!messagesDatabase[key]) {
-        messagesDatabase[key] = [];
+      const now = Date.now();
+      const timePassed = now - lastChatMsgTime;
+
+      if (timePassed < SPAM_COOLDOWN_MS) {
+        const secondsLeft = Math.ceil((SPAM_COOLDOWN_MS - timePassed) / 1000);
+        chatTimerInfo.textContent = `Подождите ${secondsLeft} сек. перед отправкой следующего сообщения.`;
+        return;
       }
 
-      const now = new Date();
-      const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+      chatTimerInfo.textContent = '';
+      lastChatMsgTime = now;
+
+      const key = getChatKey(currentUser.username, activeChatTargetUsername);
+      if (!messagesDatabase[key]) messagesDatabase[key] = [];
 
       messagesDatabase[key].push({
         from: currentUser.username,
         text: text,
-        time: timeStr
+        timestamp: Date.now()
       });
 
       saveData();
       chatInput.value = '';
       renderActiveChatMessages();
       renderDialogsList();
-    }
-
-    sendMsgBtn.addEventListener('click', handleSendMessage);
-    chatInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') handleSendMessage();
     });
 
     function checkAuth() {
@@ -1300,7 +1361,7 @@
       const password = authPasswordInput.value.trim();
 
       if (!handle || !password) {
-        alert('Пожалуйста, заполните все поля!');
+        alert('Заполните все поля!');
         return;
       }
 
@@ -1311,11 +1372,9 @@
           return;
         }
         if (usersDatabase[handle]) {
-          alert('Пользователь с таким юзернеймом уже существует!');
+          alert('Этот юзернейм уже занят!');
           return;
         }
-
-        const isAmal = (handle === 'amalplayrw');
 
         usersDatabase[handle] = {
           name: name,
@@ -1325,23 +1384,21 @@
           avatarUrl: null,
           followers: [],
           following: [],
-          isAdmin: isAmal
+          isAdmin: handle === 'amalplayrw'
         };
 
         currentUser = usersDatabase[handle];
-        saveData();
-        authModal.style.display = 'none';
-        renderPosts();
       } else {
-        if (usersDatabase[handle] && usersDatabase[handle].password === password) {
-          currentUser = usersDatabase[handle];
-          saveData();
-          authModal.style.display = 'none';
-          renderPosts();
-        } else {
-          alert('Неверный юзернейм или пароль!');
+        if (!usersDatabase[handle] || usersDatabase[handle].password !== password) {
+          alert('Неверный логин или пароль!');
+          return;
         }
+        currentUser = usersDatabase[handle];
       }
+
+      saveData();
+      authModal.style.display = 'none';
+      renderFeed();
     });
 
     openProfileBtn.addEventListener('click', () => {
@@ -1349,17 +1406,17 @@
         checkAuth();
         return;
       }
-      userNameInput.value = currentUser.name || '';
+      userNameInput.value = currentUser.name;
       userBioInput.value = currentUser.bio || '';
-      myFollowersCount.textContent = (currentUser.followers || []).length;
-      myFollowingCount.textContent = (currentUser.following || []).length;
-      
+      myFollowersCount.textContent = currentUser.followers ? currentUser.followers.length : 0;
+      myFollowingCount.textContent = currentUser.following ? currentUser.following.length : 0;
+
       if (currentUser.avatarUrl) {
         modalAvatarPreview.style.backgroundImage = `url(${currentUser.avatarUrl})`;
         modalAvatarPreview.textContent = '';
       } else {
         modalAvatarPreview.style.backgroundImage = 'none';
-        modalAvatarPreview.textContent = (currentUser.name || 'Я').charAt(0).toUpperCase();
+        modalAvatarPreview.textContent = currentUser.name.charAt(0).toUpperCase();
       }
 
       profileModal.style.display = 'flex';
@@ -1383,21 +1440,24 @@
     });
 
     saveProfileBtn.addEventListener('click', () => {
-      const newName = userNameInput.value.trim();
-      if (newName) currentUser.name = newName;
+      currentUser.name = userNameInput.value.trim() || currentUser.name;
       currentUser.bio = userBioInput.value.trim();
       if (tempAvatarUrl) {
         currentUser.avatarUrl = tempAvatarUrl;
-        tempAvatarUrl = null;
       }
-
       saveData();
       profileModal.style.display = 'none';
-      renderPosts();
+      renderFeed();
+    });
+
+    logoutBtn.addEventListener('click', () => {
+      currentUser = null;
+      saveData();
+      location.reload();
     });
 
     openSecurityBtn.addEventListener('click', () => {
-      profileDropdown.classList.remove('active');
+      profileModal.style.display = 'none';
       secUsernameInput.value = currentUser.username;
       secPasswordInput.value = currentUser.password;
       securityModal.style.display = 'flex';
@@ -1412,99 +1472,29 @@
     });
 
     saveSecurityBtn.addEventListener('click', () => {
-      const newPassword = secPasswordInput.value.trim();
-      if (newPassword) currentUser.password = newPassword;
-
       const newUsername = secUsernameInput.value.trim().toLowerCase();
-      if (newUsername && newUsername !== currentUser.username) {
-        if (usersDatabase[newUsername]) {
-          alert('Этот юзернейм уже занят!');
-          return;
-        }
-        delete usersDatabase[currentUser.username];
-        currentUser.username = newUsername;
-        currentUser.isAdmin = (newUsername === 'amalplayrw');
-        usersDatabase[newUsername] = currentUser;
+      const newPassword = secPasswordInput.value.trim();
+
+      if (!newUsername || !newPassword) {
+        alert('Поля не могут быть пустыми!');
+        return;
       }
+
+      if (newUsername !== currentUser.username && usersDatabase[newUsername]) {
+        alert('Этот юзернейм уже занят!');
+        return;
+      }
+
+      delete usersDatabase[currentUser.username];
+      currentUser.username = newUsername;
+      currentUser.password = newPassword;
+      currentUser.isAdmin = (newUsername === 'amalplayrw');
+      usersDatabase[newUsername] = currentUser;
 
       saveData();
       securityModal.style.display = 'none';
-      renderPosts();
-    });
-
-    logoutBtn.addEventListener('click', () => {
-      currentUser = null;
-      saveData();
-      profileModal.style.display = 'none';
-      authModal.style.display = 'flex';
-    });
-
-    function openViewProfile(username) {
-      if (currentUser && username.toLowerCase() === currentUser.username.toLowerCase()) {
-        openProfileBtn.click();
-        return;
-      }
-
-      activeViewUsername = username.toLowerCase();
-      const targetUser = usersDatabase[activeViewUsername] || {
-        name: username,
-        username: username,
-        bio: '',
-        avatarUrl: null,
-        followers: []
-      };
-
-      viewName.innerHTML = targetUser.name + getAdminStarHTML(activeViewUsername);
-      viewHandle.textContent = '@' + targetUser.username;
-      viewBio.textContent = targetUser.bio || 'Описание отсутствует';
-      viewFollowersCount.textContent = (targetUser.followers || []).length;
-
-      if (targetUser.avatarUrl) {
-        viewAvatar.style.backgroundImage = `url(${targetUser.avatarUrl})`;
-        viewAvatar.textContent = '';
-      } else {
-        viewAvatar.style.backgroundImage = 'none';
-        viewAvatar.textContent = targetUser.name.charAt(0).toUpperCase();
-      }
-
-      if (currentUser && targetUser.followers && targetUser.followers.includes(currentUser.username)) {
-        subscribeBtn.classList.add('subscribed');
-        subscribeBtn.querySelector('span').textContent = 'Отписаться';
-      } else {
-        subscribeBtn.classList.remove('subscribed');
-        subscribeBtn.querySelector('span').textContent = 'Подписаться';
-      }
-
-      viewProfileModal.style.display = 'flex';
-    }
-
-    closeViewProfileBtn.addEventListener('click', () => {
-      viewProfileModal.style.display = 'none';
-    });
-
-    subscribeBtn.addEventListener('click', () => {
-      if (!currentUser) {
-        checkAuth();
-        return;
-      }
-      const targetUser = usersDatabase[activeViewUsername];
-      if (!targetUser) return;
-
-      if (!targetUser.followers) targetUser.followers = [];
-      if (!currentUser.following) currentUser.following = [];
-
-      const idx = targetUser.followers.indexOf(currentUser.username);
-      if (idx > -1) {
-        targetUser.followers.splice(idx, 1);
-        const fIdx = currentUser.following.indexOf(activeViewUsername);
-        if (fIdx > -1) currentUser.following.splice(fIdx, 1);
-      } else {
-        targetUser.followers.push(currentUser.username);
-        currentUser.following.push(activeViewUsername);
-      }
-
-      saveData();
-      openViewProfile(activeViewUsername);
+      alert('Данные обновлены!');
+      renderFeed();
     });
 
     postImageInput.addEventListener('change', (e) => {
@@ -1533,13 +1523,29 @@
       }
 
       const text = postText.value.trim();
-      if (!text && !selectedPostImageUrl) return;
+      if (!text && !selectedPostImageUrl) {
+        alert('Введите текст поста или прикрепите изображение!');
+        return;
+      }
+
+      const now = Date.now();
+      const timePassed = now - lastPostTime;
+
+      if (timePassed < SPAM_COOLDOWN_MS) {
+        const secondsLeft = Math.ceil((SPAM_COOLDOWN_MS - timePassed) / 1000);
+        postTimerInfo.textContent = `Подождите ${secondsLeft} сек. перед созданием следующего поста.`;
+        return;
+      }
+
+      postTimerInfo.textContent = '';
+      lastPostTime = now;
 
       const newPost = {
         id: Date.now(),
         authorUsername: currentUser.username,
         text: text,
         imageUrl: selectedPostImageUrl,
+        timestamp: Date.now(),
         timeStr: 'Только что',
         likes: [],
         comments: []
@@ -1549,75 +1555,132 @@
       saveData();
 
       postText.value = '';
-      removeImageBtn.click();
-      renderPosts();
+      selectedPostImageUrl = null;
+      postImageInput.value = '';
+      postImagePreview.style.display = 'none';
+
+      renderFeed();
     });
 
-    function renderPosts(filterQuery = '') {
+    function openUserProfile(username) {
+      activeViewUsername = username.toLowerCase();
+      const user = usersDatabase[activeViewUsername];
+
+      if (!user) return;
+
+      viewName.innerHTML = user.name + getAdminStarHTML(username);
+      viewHandle.textContent = `@${user.username}`;
+      viewBio.textContent = user.bio || 'Описание отсутствует';
+      viewFollowersCount.textContent = user.followers ? user.followers.length : 0;
+
+      if (user.avatarUrl) {
+        viewAvatar.style.backgroundImage = `url(${user.avatarUrl})`;
+        viewAvatar.textContent = '';
+      } else {
+        viewAvatar.style.backgroundImage = 'none';
+        viewAvatar.textContent = user.name.charAt(0).toUpperCase();
+      }
+
+      if (currentUser && currentUser.username !== activeViewUsername) {
+        subscribeBtn.style.display = 'block';
+        startChatWithUserBtn.style.display = 'block';
+
+        const isSubscribed = user.followers && user.followers.includes(currentUser.username);
+        if (isSubscribed) {
+          subscribeBtn.classList.add('subscribed');
+          subscribeBtn.querySelector('span').textContent = 'Отписаться';
+        } else {
+          subscribeBtn.classList.remove('subscribed');
+          subscribeBtn.querySelector('span').textContent = 'Подписаться';
+        }
+      } else {
+        subscribeBtn.style.display = 'none';
+        startChatWithUserBtn.style.display = 'none';
+      }
+
+      viewProfileModal.style.display = 'flex';
+    }
+
+    closeViewProfileBtn.addEventListener('click', () => {
+      viewProfileModal.style.display = 'none';
+    });
+
+    subscribeBtn.addEventListener('click', () => {
+      if (!currentUser || !activeViewUsername) return;
+
+      const targetUser = usersDatabase[activeViewUsername];
+      if (!targetUser.followers) targetUser.followers = [];
+      if (!currentUser.following) currentUser.following = [];
+
+      const index = targetUser.followers.indexOf(currentUser.username);
+
+      if (index > -1) {
+        targetUser.followers.splice(index, 1);
+        const myIndex = currentUser.following.indexOf(activeViewUsername);
+        if (myIndex > -1) currentUser.following.splice(myIndex, 1);
+      } else {
+        targetUser.followers.push(currentUser.username);
+        currentUser.following.push(activeViewUsername);
+      }
+
+      saveData();
+      openUserProfile(activeViewUsername);
+    });
+
+    function renderFeed(filterText = '') {
       feed.innerHTML = '';
 
       const filtered = postsData.filter(p => {
-        if (!filterQuery) return true;
-        const q = filterQuery.toLowerCase();
-        const author = usersDatabase[p.authorUsername.toLowerCase()] || {};
-        const authorName = (author.name || '').toLowerCase();
-        return p.text.toLowerCase().includes(q) || 
-               p.authorUsername.toLowerCase().includes(q) || 
-               authorName.includes(q);
+        const query = filterText.toLowerCase();
+        return p.text.toLowerCase().includes(query) || p.authorUsername.toLowerCase().includes(query);
       });
 
-      filtered.forEach(p => {
-        const author = usersDatabase[p.authorUsername.toLowerCase()] || { name: p.authorUsername, avatarUrl: null };
-        const isLiked = currentUser && p.likes.includes(currentUser.username);
-
-        const postEl = document.createElement('div');
-        postEl.className = 'post';
+      filtered.forEach(post => {
+        const author = usersDatabase[post.authorUsername.toLowerCase()] || { name: post.authorUsername, avatarUrl: null };
+        const postElement = document.createElement('div');
+        postElement.className = 'post';
 
         const avatarStyle = author.avatarUrl ? `background-image: url(${author.avatarUrl});` : '';
         const avatarText = author.avatarUrl ? '' : author.name.charAt(0).toUpperCase();
 
-        postEl.innerHTML = `
-          <div class="post-header" onclick="openViewProfile('${p.authorUsername}')">
+        if (!post.likes) post.likes = [];
+        if (!post.comments) post.comments = [];
+
+        const isLiked = currentUser && post.likes.includes(currentUser.username);
+
+        postElement.innerHTML = `
+          <div class="post-header" onclick="openUserProfile('${post.authorUsername}')">
             <div class="avatar" style="${avatarStyle}">${avatarText}</div>
             <div class="post-info">
               <div class="author-container">
-                <span class="author">${author.name}${getAdminStarHTML(p.authorUsername)}</span>
+                <span class="author">${author.name}${getAdminStarHTML(post.authorUsername)}</span>
               </div>
-              <div class="username">@${p.authorUsername} • <span class="date">${p.timeStr}</span></div>
+              <div class="username">@${post.authorUsername}</div>
             </div>
           </div>
-          <div class="post-content">${p.text}</div>
-          ${p.imageUrl ? `<img src="${p.imageUrl}" class="post-attached-image" alt="Изображение поста">` : ''}
+          <div class="post-content">${post.text}</div>
+          ${post.imageUrl ? `<img src="${post.imageUrl}" class="post-attached-image">` : ''}
+          
           <div class="post-actions">
-            <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="toggleLike(${p.id})">
-              ❤️ <span>${p.likes.length}</span>
+            <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="toggleLike(${post.id})">
+              ❤️ <span>${post.likes.length}</span>
             </button>
-            <button class="toggle-comments-btn" onclick="toggleComments(${p.id})">
-              💬 <span>${p.comments.length}</span>
+            <button class="toggle-comments-btn" onclick="toggleComments(${post.id})">
+              💬 <span>${post.comments.length}</span>
             </button>
           </div>
-          <div class="comments-wrapper" id="comments-${p.id}">
-            <div class="comments-list" id="comments-list-${p.id}">
-              ${p.comments.map(c => {
-                const cAuthor = usersDatabase[c.authorUsername.toLowerCase()] || { name: c.authorUsername };
-                return `
-                  <div class="comment-item">
-                    <span class="comment-author" onclick="openViewProfile('${c.authorUsername}')">
-                      ${cAuthor.name}${getAdminStarHTML(c.authorUsername)}:
-                    </span>
-                    ${c.text}
-                  </div>
-                `;
-              }).join('')}
-            </div>
+
+          <div class="comments-wrapper" id="comments-${post.id}">
+            <div class="comments-list" id="comments-list-${post.id}"></div>
             <div class="add-comment-box">
-              <input type="text" id="comment-input-${p.id}" placeholder="Написать комментарий...">
-              <button onclick="addComment(${p.id})">Отправить</button>
+              <input type="text" id="comment-input-${post.id}" placeholder="Оставьте комментарий...">
+              <button onclick="addComment(${post.id})">Отправить</button>
             </div>
           </div>
         `;
 
-        feed.appendChild(postEl);
+        feed.appendChild(postElement);
+        renderComments(post);
       });
     }
 
@@ -1629,20 +1692,45 @@
       const post = postsData.find(p => p.id === postId);
       if (!post) return;
 
-      const idx = post.likes.indexOf(currentUser.username);
-      if (idx > -1) {
-        post.likes.splice(idx, 1);
+      if (!post.likes) post.likes = [];
+
+      const index = post.likes.indexOf(currentUser.username);
+      if (index > -1) {
+        post.likes.splice(index, 1);
       } else {
         post.likes.push(currentUser.username);
       }
 
       saveData();
-      renderPosts(searchInput.value.trim());
+      renderFeed(searchInput.value);
     }
 
     function toggleComments(postId) {
       const wrapper = document.getElementById(`comments-${postId}`);
-      if (wrapper) wrapper.classList.toggle('active');
+      if (wrapper) {
+        wrapper.classList.toggle('active');
+      }
+    }
+
+    function renderComments(post) {
+      const container = document.getElementById(`comments-list-${post.id}`);
+      if (!container) return;
+
+      container.innerHTML = '';
+      if (!post.comments) post.comments = [];
+
+      post.comments.forEach(c => {
+        const cAuthor = usersDatabase[c.authorUsername.toLowerCase()] || { name: c.authorUsername };
+        const commentItem = document.createElement('div');
+        commentItem.className = 'comment-item';
+        commentItem.innerHTML = `
+          <span class="comment-author" onclick="openUserProfile('${c.authorUsername}')">
+            ${cAuthor.name}${getAdminStarHTML(c.authorUsername)}:
+          </span>
+          <span>${c.text}</span>
+        `;
+        container.appendChild(commentItem);
+      });
     }
 
     function addComment(postId) {
@@ -1650,35 +1738,41 @@
         checkAuth();
         return;
       }
+
       const input = document.getElementById(`comment-input-${postId}`);
       const text = input.value.trim();
+
       if (!text) return;
 
       const post = postsData.find(p => p.id === postId);
       if (!post) return;
 
+      if (!post.comments) post.comments = [];
+
       post.comments.push({
         authorUsername: currentUser.username,
-        text: text
+        text: text,
+        timestamp: Date.now()
       });
 
       saveData();
-      renderPosts(searchInput.value.trim());
+      input.value = '';
+      renderFeed(searchInput.value);
+
       const wrapper = document.getElementById(`comments-${postId}`);
       if (wrapper) wrapper.classList.add('active');
     }
 
     searchInput.addEventListener('input', (e) => {
-      renderPosts(e.target.value.trim());
+      renderFeed(e.target.value);
     });
 
     logoBtn.addEventListener('click', () => {
       searchInput.value = '';
-      renderPosts();
+      renderFeed();
     });
 
-    checkAuth();
-    renderPosts();
+    renderFeed();
   </script>
 </body>
 </html>
